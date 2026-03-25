@@ -1,0 +1,7 @@
+quartier_app/data/shapef/
+
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg

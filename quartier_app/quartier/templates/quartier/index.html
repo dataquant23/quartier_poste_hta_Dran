@@ -1,0 +1,100 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quartiers alimentés par les postes</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="{% static 'quartier/app.css' %}" />
+</head>
+<body>
+    <div class="page-shell">
+        <header class="hero">
+            <div>
+                <p class="eyebrow">DRAN • Cartographie HTA</p>
+                <h3>Quartiers alimentés par les postes</h3>
+            </div>
+        </header>
+
+        <section class="control-panel card">
+            <div class="search-block">
+                <label for="searchInput">Recherche poste / libellé</label>
+                <input id="searchInput" type="text" placeholder="Ex: B.C.E.A.O ou 151" autocomplete="off" />
+                <div id="searchResults" class="search-results"></div>
+            </div>
+            <div class="rayon-block">
+                <label for="rayonInput">Rayon (m)</label>
+                <input id="rayonInput" type="number" min="1" step="1" value="{{ DEFAULT_RADIUS }}" />
+            </div>
+            <div class="action-block">
+                <button id="computeBtn" class="btn btn-primary" type="button">Actualiser</button>
+                <button id="downloadBtn" class="btn btn-primary" type="button">Télécharger</button>
+                <button id="refreshBtn" class="btn btn-secondary" type="button">Rafraîchir</button>
+                
+            </div>
+        </section>
+
+        <section class="selected-panel card">
+            <div class="section-head"><h2>Postes sélectionnés</h2><span id="selectionCount" class="count-pill">0</span></div>
+            <div id="selectedList" class="selected-list"></div>
+        </section>
+
+        <section class="content-grid">
+            <div class="map-card card">
+                <div class="section-head"><h2>Carte</h2><span id="statusText" class="muted">Prête</span></div>
+                <div id="map"></div>
+            </div>
+
+            <section class="results-card card">
+                <div class="section-head"><h2>Résultats</h2><span id="resultCount" class="count-pill">0</span></div>
+                <div class="table-wrap">
+                    <table id="resultTable">
+                        <thead>
+                            <tr>
+                                <th>Libellé</th>
+                                <th>Poste</th>
+                                <th>Quartier source</th>
+                                <th>Précision</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in precalc_rows %}
+                            <tr>
+                                <td>{{ row.libelle }}</td>
+                                <td>{{ row.Nom_poste }}</td>
+                                <td><span class="quartier-tag is-static">{{ row.quartier_source }}</span></td>
+                                <td>{{ row.precision }}</td>
+                                <td><button type="button" class="btn btn-secondary" disabled>Modifier</button></td>
+                            </tr>
+                            {% empty %}
+                            <tr><td colspan="5">Sélectionne un ou plusieurs postes puis clique sur Actualiser.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </section>
+    </div>
+
+    <footer class="app-footer">POWERED BY DCPIQ / TEAM SDRO</footer>
+
+    <div style="display:none;">
+        {% csrf_token %}
+    </div>
+
+    <script>
+        window.QUARTIER_APP = {
+            searchUrl: "{% url 'quartier:api_search_postes' %}",
+            computeUrl: "{% url 'quartier:api_compute' %}",
+            refreshUrl: "{% url 'quartier:api_refresh' %}",
+            posteContextUrl: "{% url 'quartier:api_poste_context' %}",
+            updatePrecisionUrl: "{% url 'quartier:api_update_precision' %}",
+            downloadUrl: "{% url 'quartier:download_excel' %}"
+        };
+    </script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="{% static 'quartier/app.js' %}"></script>
+</body>
+</html>
