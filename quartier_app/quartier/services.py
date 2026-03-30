@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+import tempfile
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from zipfile import BadZipFile
 
 import geopandas as gpd
 import pandas as pd
@@ -17,6 +21,9 @@ DEFAULT_RADIUS = settings.DEFAULT_RADIUS
 
 os.environ["SHAPE_RESTORE_SHX"] = "YES"
 
+_GROUP_OVERRIDE_TABLE = "quartier_group_precision_overrides"
+_GROUP_DB_LOCK = threading.Lock()
+
 
 @dataclass
 class ResultPayload:
@@ -24,6 +31,7 @@ class ResultPayload:
     postes_geojson: dict
     zones_geojson: dict
     pois_geojson: dict
+    pharmacies_geojson: dict
     rayon: int
 
 
@@ -31,6 +39,13 @@ def _clean_text(value) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
+
+
+def _normalize_token(value: str) -> str:
+    txt = _clean_text(value)
+    if not txt:
+        return ""
+    return " ".join(txt.split()).strip()
 
 
 def _geom_to_wkt(geom):
@@ -61,17 +76,105 @@ def _first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | Non
     return None
 
 
-def _concat_precision(poi_proche, pharmacie) -> str:
-    parts = []
-    for value in [poi_proche, pharmacie]:
-        txt = _clean_text(value)
-        if txt:
-            parts.append(txt)
-    return ", ".join(parts)
-
-
 def _normalize_selected_keys(selected_keys: list[str]) -> list[str]:
     return [str(x).strip() for x in selected_keys if str(x).strip()]
+
+
+def _build_group_key(selected_key: str, quartier_source: str) -> str:
+    return f"{_normalize_token(selected_key)}||{_normalize_token(quartier_source)}"
+
+
+def _get_sqlite_db_path() -> Path:
+    db_name = settings.DATABASES["default"]["NAME"]
+    return Path(db_name)
+
+
+def _ensure_group_override_table() -> None:
+    db_path = _get_sqlite_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with _GROUP_DB_LOCK:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {_GROUP_OVERRIDE_TABLE} (
+                    group_key TEXT PRIMARY KEY,
+                    selected_key TEXT NOT NULL,
+                    quartier_source TEXT NOT NULL,
+                    precision_override TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.commit()
+
+
+def _load_group_override_map() -> dict[str, str]:
+    _ensure_group_override_table()
+    db_path = _get_sqlite_db_path()
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT group_key, precision_override
+            FROM {_GROUP_OVERRIDE_TABLE}
+            """
+        ).fetchall()
+
+    out = {}
+    for group_key, precision in rows:
+        gk = _clean_text(group_key)
+        pv = _clean_text(precision)
+        if gk and pv:
+            out[gk] = pv
+    return out
+
+
+def save_group_precision_override(
+    group_key: str,
+    selected_key: str,
+    quartier_source: str,
+    precision_override: str,
+) -> dict:
+    group_key = _clean_text(group_key)
+    selected_key = _clean_text(selected_key)
+    quartier_source = _clean_text(quartier_source)
+    precision_override = _clean_text(precision_override)
+
+    if not group_key:
+        group_key = _build_group_key(selected_key, quartier_source)
+
+    if not group_key:
+        raise ValueError("group_key manquant.")
+
+    _ensure_group_override_table()
+    db_path = _get_sqlite_db_path()
+
+    with _GROUP_DB_LOCK:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                f"""
+                INSERT INTO {_GROUP_OVERRIDE_TABLE}
+                    (group_key, selected_key, quartier_source, precision_override, created_at, updated_at)
+                VALUES
+                    (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(group_key) DO UPDATE SET
+                    selected_key = excluded.selected_key,
+                    quartier_source = excluded.quartier_source,
+                    precision_override = excluded.precision_override,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (group_key, selected_key, quartier_source, precision_override),
+            )
+            conn.commit()
+
+    return {
+        "group_key": group_key,
+        "selected_key": selected_key,
+        "quartier_source": quartier_source,
+        "precision_override": precision_override,
+    }
 
 
 def _ensure_overrides_file() -> Path:
@@ -99,8 +202,14 @@ def load_postes() -> gpd.GeoDataFrame:
     if col_x is None or col_y is None:
         raise ValueError("Colonnes X/Y introuvables dans le fichier poste.")
 
-    df[col_x] = pd.to_numeric(df[col_x].astype(str).str.replace(",", ".", regex=False), errors="coerce")
-    df[col_y] = pd.to_numeric(df[col_y].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    df[col_x] = pd.to_numeric(
+        df[col_x].astype(str).str.replace(",", ".", regex=False),
+        errors="coerce",
+    )
+    df[col_y] = pd.to_numeric(
+        df[col_y].astype(str).str.replace(",", ".", regex=False),
+        errors="coerce",
+    )
 
     for col in df.columns:
         if df[col].dtype == object:
@@ -151,7 +260,14 @@ def load_precalc() -> pd.DataFrame:
     path = Path(settings.PRECALC_XLSX)
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_excel(path)
+
+    try:
+        df = pd.read_excel(path)
+    except BadZipFile as e:
+        raise ValueError(
+            f"Le fichier '{path.name}' est corrompu ou incomplet. Relance d'abord un rafraîchissement."
+        ) from e
+
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
@@ -161,6 +277,7 @@ def load_final_geojson() -> dict:
     path = Path(settings.FINAL_GEOJSON)
     if not path.exists():
         return {"type": "FeatureCollection", "features": []}
+
     gdf = gpd.read_file(path)
     return gdf.__geo_interface__
 
@@ -198,7 +315,12 @@ def _nearest_feature_info(geom, gdf: gpd.GeoDataFrame, name_col: str) -> tuple[s
     return (name or None), feat_geom
 
 
-def _top_nearest_features(geom, gdf: gpd.GeoDataFrame, name_col: str, top_n: int = 6) -> list[tuple[str | None, object | None, float]]:
+def _top_nearest_features(
+    geom,
+    gdf: gpd.GeoDataFrame,
+    name_col: str,
+    top_n: int = 6,
+) -> list[tuple[str | None, object | None, float]]:
     if gdf.empty or geom is None or geom.is_empty:
         return []
 
@@ -219,25 +341,32 @@ def _top_nearest_features(geom, gdf: gpd.GeoDataFrame, name_col: str, top_n: int
 def _nearest_landuse_type(geom, land_gdf: gpd.GeoDataFrame) -> str | None:
     if land_gdf.empty:
         return None
+
     inter = land_gdf[land_gdf.intersects(geom)]
     if inter.empty:
         return None
+
     if "fclass" in inter.columns:
         vals = inter["fclass"].dropna().astype(str).str.strip()
         vals = vals[vals != ""]
         if len(vals) > 0:
             return vals.iloc[0]
+
     return "landuse"
 
 
 def _load_pharmacies() -> gpd.GeoDataFrame:
     gdf = gpd.read_file(settings.PHARMACIES_GEOJSON)
     gdf.columns = gdf.columns.str.strip()
+
     if gdf.crs is None:
         gdf = gdf.set_crs(settings.OSM_SOURCE_CRS, allow_override=True)
+
     gdf = gdf.to_crs(CALC_CRS)
+
     if "Nom" not in gdf.columns:
         gdf["Nom"] = None
+
     gdf["Nom"] = gdf["Nom"].apply(_clean_text)
     return gdf[gdf.geometry.notna()].copy()
 
@@ -249,6 +378,7 @@ def _load_poi_propose_map() -> dict[str, str]:
 
     df = pd.read_excel(path)
     df.columns = df.columns.str.strip()
+
     for col in df.columns:
         if df[col].dtype == object:
             df[col] = df[col].apply(_clean_text)
@@ -265,6 +395,89 @@ def _load_poi_propose_map() -> dict[str, str]:
         if lib and precision:
             out[lib] = precision
     return out
+
+
+def _unique_texts(values: list[str]) -> list[str]:
+    out = []
+    seen = set()
+
+    for value in values:
+        txt = _clean_text(value)
+        key = txt.lower()
+        if txt and key not in seen:
+            seen.add(key)
+            out.append(txt)
+
+    return out
+
+
+def _split_precision_items(value: str) -> list[str]:
+    txt = _normalize_token(value)
+    if not txt:
+        return []
+
+    parts = [p.strip() for p in txt.split(",") if p.strip()]
+    return [_normalize_token(p) for p in parts if _normalize_token(p)]
+
+
+def _dedupe_tokens(values: list[str]) -> list[str]:
+    out = []
+    seen = set()
+
+    for value in values:
+        token = _normalize_token(value)
+        key = token.lower()
+        if token and key not in seen:
+            seen.add(key)
+            out.append(token)
+
+    return out
+
+
+def _concat_precision(poi_proche, pharmacie) -> str:
+    parts = []
+    for value in [poi_proche, pharmacie]:
+        txt = _clean_text(value)
+        if txt:
+            parts.append(txt)
+    return ", ".join(parts)
+
+
+def _resolve_row_precision(row: pd.Series) -> str:
+    precision = _clean_text(row.get("precision"))
+    if precision:
+        return precision
+
+    precision_override = _clean_text(row.get("precision_override"))
+    if precision_override:
+        return precision_override
+
+    precision_calculee = _clean_text(row.get("precision_calculee"))
+    if precision_calculee:
+        return precision_calculee
+
+    poi_val = _clean_text(row.get("poi_proche"))
+    pharma_val = _clean_text(row.get("pharmacie"))
+
+    fallback_parts = []
+    if poi_val:
+        fallback_parts.append(poi_val)
+    if pharma_val:
+        fallback_parts.append(pharma_val)
+
+    return ", ".join(fallback_parts)
+
+
+def _build_group_precision_from_rows(grp: pd.DataFrame) -> str:
+    all_tokens = []
+
+    for _, row in grp.iterrows():
+        precision_val = _resolve_row_precision(row)
+        tokens = _split_precision_items(precision_val)
+        all_tokens.extend(tokens)
+
+    final_parts = _dedupe_tokens(all_tokens)
+    return ", ".join(final_parts)
 
 
 def reverse_geocode(lat, lon):
@@ -303,7 +516,10 @@ def search_postes(query: str = "", limit: int = 20) -> list[dict]:
     else:
         subset = gdf.copy()
 
-    result_cols = [c for c in ["libelle_ref", "Nom_poste_ref", "DR", "EXPLOITATION", "selected_key"] if c in subset.columns]
+    result_cols = [
+        c for c in ["libelle_ref", "Nom_poste_ref", "DR", "EXPLOITATION", "selected_key"]
+        if c in subset.columns
+    ]
     subset = subset[result_cols].drop_duplicates(subset=["selected_key"]).head(limit).copy()
     subset = subset.rename(columns={"libelle_ref": "libelle", "Nom_poste_ref": "Nom_poste"})
     return subset.to_dict(orient="records")
@@ -350,26 +566,11 @@ def _build_final_dataset(rayon: int) -> gpd.GeoDataFrame:
     pharma_keep = [c for c in ["Nom", "geometry"] if c in gdf_pharma.columns]
     gdf_pharma = gdf_pharma[pharma_keep].copy()
 
-    try:
-        _ = quartiers.sindex
-    except Exception:
-        pass
-    try:
-        _ = gdf_land.sindex
-    except Exception:
-        pass
-    try:
-        _ = gdf_pois.sindex
-    except Exception:
-        pass
-    try:
-        _ = gdf_roads.sindex
-    except Exception:
-        pass
-    try:
-        _ = gdf_pharma.sindex
-    except Exception:
-        pass
+    for current in [quartiers, gdf_land, gdf_pois, gdf_roads, gdf_pharma]:
+        try:
+            _ = current.sindex
+        except Exception:
+            pass
 
     poste_cols = [
         c for c in postes.columns
@@ -378,14 +579,7 @@ def _build_final_dataset(rayon: int) -> gpd.GeoDataFrame:
 
     all_rows = []
 
-    print("Début génération dataset final")
-    print("Nb postes :", len(postes))
-    print("Nb quartiers :", len(quartiers))
-
-    for poste_idx, (_, poste) in enumerate(postes.iterrows(), start=1):
-        if poste_idx % 100 == 0:
-            print(f"Postes traités : {poste_idx}/{len(postes)}")
-
+    for _, poste in postes.iterrows():
         point_poste = poste.geometry
         if point_poste is None or point_poste.is_empty:
             continue
@@ -402,7 +596,7 @@ def _build_final_dataset(rayon: int) -> gpd.GeoDataFrame:
 
         poi_propose_val = poi_precision_map.get(poste["libelle_ref"])
 
-        for q_idx, q_row in q_sel.iterrows():
+        for _, q_row in q_sel.iterrows():
             quartier_geom = q_row.geometry
             if quartier_geom is None or quartier_geom.is_empty:
                 continue
@@ -453,13 +647,15 @@ def _build_final_dataset(rayon: int) -> gpd.GeoDataFrame:
                 row["pharmacie"] = pharmacie_name
                 row["precision_calculee"] = precision
                 row["precision_override"] = None
-                row["precision"] = precision
+                row["precision"] = ""
                 row["type_zone"] = zone_type
                 row["rayon_m"] = rayon
                 row["distance_poste_m"] = round(float(poi_dist), 2) if poi_name else distance_poste_zone
 
-                poi_part = _clean_text(poi_name) if poi_name else "VIDE"
-                row["row_key"] = f"{poste['selected_key']}||{q_idx}||{poi_part}"
+                quartier_part = _clean_text(q_row.get("quartier_source")) or "QUARTIER"
+                poi_part = _clean_text(poi_name) or _clean_text(pharmacie_name) or "VIDE"
+                row["row_key"] = f"{poste['selected_key']}||{quartier_part}||{poi_part}"
+                row["group_key"] = _build_group_key(poste["selected_key"], quartier_part)
 
                 row["geometry_zone_interet"] = _geom_to_wkt(zone_interet)
                 row["geometry_poi_proche"] = _geom_to_wkt(poi_geom)
@@ -467,9 +663,6 @@ def _build_final_dataset(rayon: int) -> gpd.GeoDataFrame:
                 row["geometry"] = piece
 
                 all_rows.append(row)
-
-    print("Fin génération dataset final")
-    print("Nb lignes générées :", len(all_rows))
 
     if not all_rows:
         return gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs=CALC_CRS)
@@ -479,7 +672,11 @@ def _build_final_dataset(rayon: int) -> gpd.GeoDataFrame:
 
 def _load_overrides() -> pd.DataFrame:
     path = _ensure_overrides_file()
-    df = pd.read_excel(path, dtype={"row_key": str, "precision_override": str})
+    try:
+        df = pd.read_excel(path, dtype={"row_key": str, "precision_override": str})
+    except BadZipFile:
+        return pd.DataFrame(columns=["row_key", "precision_override"])
+
     df.columns = [str(c).strip() for c in df.columns]
 
     if "row_key" not in df.columns:
@@ -493,27 +690,35 @@ def _load_overrides() -> pd.DataFrame:
     df = df[df["row_key"] != ""].drop_duplicates(subset=["row_key"], keep="last").copy()
     return df
 
-def _apply_precision_overrides(df: pd.DataFrame) -> pd.DataFrame:
+
+def _apply_legacy_precision_overrides(df: pd.DataFrame) -> pd.DataFrame:
     overrides = _load_overrides()
     if df.empty:
         return df
 
+    work = df.copy()
+
     if overrides.empty:
-        df["precision_override"] = df.get("precision_override", "").apply(_clean_text)
-        df["precision_calculee"] = df.get("precision_calculee", "").apply(_clean_text)
-        df["precision"] = df.apply(
+        if "precision_override" not in work.columns:
+            work["precision_override"] = ""
+        if "precision_calculee" not in work.columns:
+            work["precision_calculee"] = ""
+        work["precision_override"] = work["precision_override"].fillna("").apply(_clean_text)
+        work["precision_calculee"] = work["precision_calculee"].fillna("").apply(_clean_text)
+        work["precision"] = work.apply(
             lambda row: row["precision_override"] if row["precision_override"] else row["precision_calculee"],
             axis=1,
         )
-        return df
+        return work
 
-    merged = df.merge(overrides, on="row_key", how="left", suffixes=("", "_ovr"))
+    merged = work.merge(overrides, on="row_key", how="left", suffixes=("", "_ovr"))
+
     if "precision_override_ovr" in merged.columns:
         merged["precision_override"] = merged["precision_override_ovr"].fillna(merged.get("precision_override"))
         merged = merged.drop(columns=["precision_override_ovr"])
 
     merged["precision_override"] = merged["precision_override"].fillna("").apply(_clean_text)
-    merged["precision_calculee"] = merged["precision_calculee"].fillna("").apply(_clean_text)
+    merged["precision_calculee"] = merged.get("precision_calculee", "").fillna("").apply(_clean_text)
     merged["precision"] = merged.apply(
         lambda row: row["precision_override"] if row["precision_override"] else row["precision_calculee"],
         axis=1,
@@ -521,88 +726,74 @@ def _apply_precision_overrides(df: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
+def _atomic_write_excel(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=path.suffix, dir=path.parent)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    try:
+        df.to_excel(tmp_path, index=False)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def _atomic_write_geojson(gdf: gpd.GeoDataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=path.suffix, dir=path.parent)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    try:
+        gdf.to_file(tmp_path, driver="GeoJSON")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
 def refresh_final_dataset(rayon: int = DEFAULT_RADIUS) -> pd.DataFrame:
     gdf = _build_final_dataset(rayon)
 
     if gdf.empty:
-        pd.DataFrame().to_excel(settings.PRECALC_XLSX, index=False)
+        _atomic_write_excel(pd.DataFrame(), Path(settings.PRECALC_XLSX))
         empty_gdf = gpd.GeoDataFrame({"geometry": []}, geometry="geometry", crs=CALC_CRS)
-        empty_gdf.to_crs(MAP_CRS).to_file(settings.FINAL_GEOJSON, driver="GeoJSON")
+        _atomic_write_geojson(empty_gdf.to_crs(MAP_CRS), Path(settings.FINAL_GEOJSON))
         clear_runtime_caches()
         return pd.DataFrame()
 
-    gdf = _apply_precision_overrides(gdf)
-
     excel_df = gdf.drop(columns="geometry").copy()
     excel_df["geometry"] = gdf.geometry.apply(_geom_to_wkt)
-    excel_df.to_excel(settings.PRECALC_XLSX, index=False)
+
+    _atomic_write_excel(excel_df, Path(settings.PRECALC_XLSX))
 
     export_gdf = gdf.copy().to_crs(MAP_CRS)
-    export_gdf.to_file(settings.FINAL_GEOJSON, driver="GeoJSON")
+    _atomic_write_geojson(export_gdf, Path(settings.FINAL_GEOJSON))
 
     clear_runtime_caches()
     return excel_df
 
-def save_precision_override(row_key: str, precision_override: str) -> dict:
-    row_key = _clean_text(row_key)
-    precision_override = _clean_text(precision_override)
 
-    if not row_key:
-        raise ValueError("row_key manquant.")
+def _ensure_final_dataset(rayon: int = DEFAULT_RADIUS) -> pd.DataFrame:
+    df = load_precalc().copy()
+    if df.empty:
+        return df
 
-    path = _ensure_overrides_file()
-
-    df = pd.read_excel(path, dtype={"row_key": str, "precision_override": str})
-    df.columns = [str(c).strip() for c in df.columns]
-
-    if "row_key" not in df.columns:
-        df["row_key"] = ""
-    if "precision_override" not in df.columns:
-        df["precision_override"] = ""
-
-    df["row_key"] = df["row_key"].fillna("").astype(str).apply(_clean_text)
-    df["precision_override"] = df["precision_override"].fillna("").astype(str).apply(_clean_text)
-
-    if row_key in set(df["row_key"]):
-        df.loc[df["row_key"] == row_key, "precision_override"] = str(precision_override)
-    else:
-        df = pd.concat(
-            [df, pd.DataFrame([{"row_key": str(row_key), "precision_override": str(precision_override)}])],
-            ignore_index=True,
-        )
-
-    df["row_key"] = df["row_key"].astype(str)
-    df["precision_override"] = df["precision_override"].astype(str)
-
-    df = df.drop_duplicates(subset=["row_key"], keep="last")
-    df.to_excel(path, index=False)
-
-    final_df = load_precalc().copy()
-    if not final_df.empty and "row_key" in final_df.columns:
-        final_df["row_key"] = final_df["row_key"].fillna("").astype(str).apply(_clean_text)
-
-        if "precision_override" not in final_df.columns:
-            final_df["precision_override"] = ""
-
-        final_df["precision_override"] = final_df["precision_override"].fillna("").astype(str)
-        final_df["precision_calculee"] = final_df.get("precision_calculee", "").fillna("").astype(str).apply(_clean_text)
-
-        final_df.loc[final_df["row_key"] == row_key, "precision_override"] = str(precision_override)
-        final_df["precision"] = final_df.apply(
-            lambda row: row["precision_override"] if _clean_text(row["precision_override"]) else row["precision_calculee"],
+    if "group_key" not in df.columns:
+        df["group_key"] = df.apply(
+            lambda row: _build_group_key(row.get("selected_key", ""), row.get("quartier_source", "")),
             axis=1,
         )
 
-        final_df.to_excel(settings.PRECALC_XLSX, index=False)
-        clear_runtime_caches()
-
-        row = final_df[final_df["row_key"] == row_key].head(1).fillna("").to_dict(orient="records")
-        if row:
-            return row[0]
-
-    return {"row_key": row_key, "precision_override": precision_override}
-def _ensure_final_dataset(rayon: int = DEFAULT_RADIUS) -> pd.DataFrame:
-    return load_precalc().copy()
+    return _apply_legacy_precision_overrides(df)
 
 
 def _build_postes_geojson(filtered: pd.DataFrame) -> dict:
@@ -635,7 +826,7 @@ def _build_zones_geojson(filtered: pd.DataFrame) -> dict:
         return {"type": "FeatureCollection", "features": []}
 
     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs=CALC_CRS)
-    keep_cols = [c for c in ["row_key", "libelle", "Nom_poste", "quartier_source", "precision"] if c in gdf.columns]
+    keep_cols = [c for c in ["group_key", "row_key", "libelle", "Nom_poste", "quartier_source", "precision"] if c in gdf.columns]
     gdf = gdf[keep_cols + ["geometry"]].copy()
 
     return gdf.to_crs(MAP_CRS).__geo_interface__
@@ -645,14 +836,30 @@ def _build_pois_geojson(filtered: pd.DataFrame) -> dict:
     if filtered.empty or "geometry_poi_proche" not in filtered.columns:
         return {"type": "FeatureCollection", "features": []}
 
-    df = filtered[["row_key", "poi_proche", "geometry_poi_proche"]].copy()
+    df = filtered[["group_key", "row_key", "poi_proche", "geometry_poi_proche"]].copy()
     df["geometry"] = df["geometry_poi_proche"].apply(_safe_wkt)
     df = df[df["geometry"].notna()].copy()
     if df.empty:
         return {"type": "FeatureCollection", "features": []}
 
-    gdf = gpd.GeoDataFrame(df[["row_key", "poi_proche", "geometry"]], geometry="geometry", crs=CALC_CRS)
+    gdf = gpd.GeoDataFrame(df[["group_key", "row_key", "poi_proche", "geometry"]], geometry="geometry", crs=CALC_CRS)
     gdf = gdf.drop_duplicates(subset=["poi_proche", "geometry"])
+
+    return gdf.to_crs(MAP_CRS).__geo_interface__
+
+
+def _build_pharmacies_geojson(filtered: pd.DataFrame) -> dict:
+    if filtered.empty or "geometry_pharmacie_proche" not in filtered.columns:
+        return {"type": "FeatureCollection", "features": []}
+
+    df = filtered[["group_key", "row_key", "pharmacie", "geometry_pharmacie_proche"]].copy()
+    df["geometry"] = df["geometry_pharmacie_proche"].apply(_safe_wkt)
+    df = df[df["geometry"].notna()].copy()
+    if df.empty:
+        return {"type": "FeatureCollection", "features": []}
+
+    gdf = gpd.GeoDataFrame(df[["group_key", "row_key", "pharmacie", "geometry"]], geometry="geometry", crs=CALC_CRS)
+    gdf = gdf.drop_duplicates(subset=["pharmacie", "geometry"])
 
     return gdf.to_crs(MAP_CRS).__geo_interface__
 
@@ -673,7 +880,7 @@ def _zone_type_priority(zone_type: str) -> int:
         "industrial": 70,
         "residential": 60,
         "cemetery": 50,
-        "military": 50,
+        "military": 90,
         "grass": 20,
         "meadow": 20,
         "forest": 15,
@@ -782,74 +989,111 @@ def _build_priority_table(df: pd.DataFrame, max_per_quartier: int = 3, top_dista
     )
 
 
-
-def _unique_texts(values: list[str]) -> list[str]:
-    out = []
-    seen = set()
-    for value in values:
-        txt = _clean_text(value)
-        key = txt.lower()
-        if txt and key not in seen:
-            seen.add(key)
-            out.append(txt)
-    return out
-
-
 def _aggregate_priority_table(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=[
-            "row_key",
-            "libelle",
-            "Nom_poste",
-            "quartier_source",
-            "quartier_label",
-            "precision",
-            "details",
-            "row_keys",
-        ])
+        return pd.DataFrame(
+            columns=[
+                "group_key",
+                "row_key",
+                "libelle",
+                "Nom_poste",
+                "quartier_source",
+                "quartier_label",
+                "precision",
+                "details",
+                "row_keys",
+                "selected_key",
+            ]
+        )
 
     work = df.copy()
-    for col in ["selected_key", "libelle", "Nom_poste", "quartier_source", "precision", "row_key"]:
+    for col in ["selected_key", "libelle", "Nom_poste", "quartier_source", "precision", "row_key", "group_key"]:
         if col not in work.columns:
             work[col] = ""
 
+    work["selected_key"] = work["selected_key"].apply(_normalize_token)
+    work["libelle"] = work["libelle"].apply(_normalize_token)
+    work["Nom_poste"] = work["Nom_poste"].apply(_normalize_token)
+    work["quartier_source"] = work["quartier_source"].apply(_normalize_token)
+    work["precision"] = work["precision"].apply(_clean_text)
+    work["row_key"] = work["row_key"].apply(_clean_text)
+    work["group_key"] = work.apply(
+        lambda row: _clean_text(row.get("group_key")) or _build_group_key(row.get("selected_key", ""), row.get("quartier_source", "")),
+        axis=1,
+    )
+
+    group_override_map = _load_group_override_map()
     grouped_rows = []
-    for (selected_key, quartier_source), grp in work.groupby(["selected_key", "quartier_source"], dropna=False, sort=False):
+
+    for (selected_key, quartier_source), grp in work.groupby(
+        ["selected_key", "quartier_source"],
+        dropna=False,
+        sort=False,
+    ):
         grp = grp.copy()
+
         if "distance_poste_m" in grp.columns:
             grp["distance_poste_m"] = pd.to_numeric(grp["distance_poste_m"], errors="coerce").fillna(999999)
             grp = grp.sort_values("distance_poste_m", ascending=True)
 
         first = grp.iloc[0]
         details = []
-        precision_parts = []
         row_keys = []
+        seen_detail_keys = set()
+
+        poi_names = _unique_texts(grp.get("poi_proche", pd.Series(dtype=str)).tolist())
+        pharmacie_names = _unique_texts(grp.get("pharmacie", pd.Series(dtype=str)).tolist())
 
         for _, row in grp.iterrows():
             row_key = _clean_text(row.get("row_key"))
-            precision_value = _clean_text(row.get("precision"))
-            if precision_value:
-                precision_parts.append(precision_value)
-            if row_key:
-                row_keys.append(row_key)
-            details.append({
-                "row_key": row_key,
-                "precision": precision_value,
-                "poi_proche": _clean_text(row.get("poi_proche")),
-                "pharmacie": _clean_text(row.get("pharmacie")),
-            })
+            poi_value = _clean_text(row.get("poi_proche"))
+            pharmacie_value = _clean_text(row.get("pharmacie"))
+            detail_precision = _resolve_row_precision(row)
 
-        grouped_rows.append({
-            "row_key": _clean_text(first.get("row_key")),
-            "selected_key": _clean_text(selected_key),
-            "libelle": _clean_text(first.get("libelle")),
-            "Nom_poste": _clean_text(first.get("Nom_poste")),
-            "quartier_source": _clean_text(quartier_source),
-            "quartier_label": _clean_text(quartier_source),
-            "precision": ", ".join(_unique_texts(precision_parts)),
-            "details": details,
-            "row_keys": row_keys,
-        })
+            if row_key and row_key not in row_keys:
+                row_keys.append(row_key)
+
+            detail_key = (
+                _normalize_token(detail_precision).lower(),
+                _normalize_token(poi_value).lower(),
+                _normalize_token(pharmacie_value).lower(),
+            )
+            if detail_key in seen_detail_keys:
+                continue
+            seen_detail_keys.add(detail_key)
+
+            details.append(
+                {
+                    "row_key": row_key,
+                    "precision": detail_precision,
+                    "poi_proche": poi_value,
+                    "pharmacie": pharmacie_value,
+                }
+            )
+
+        group_key = _build_group_key(selected_key, quartier_source)
+        group_override = _clean_text(group_override_map.get(group_key))
+        precision_calculee_groupe = _build_group_precision_from_rows(grp)
+        precision_finale = group_override or precision_calculee_groupe
+
+        grouped_rows.append(
+            {
+                "group_key": group_key,
+                "row_key": _clean_text(first.get("row_key")),
+                "selected_key": _clean_text(selected_key),
+                "libelle": _clean_text(first.get("libelle")),
+                "Nom_poste": _clean_text(first.get("Nom_poste")),
+                "quartier_source": _clean_text(quartier_source),
+                "quartier_label": _clean_text(quartier_source),
+                "precision": precision_finale,
+                "precision_override": group_override,
+                "precision_calculee": precision_calculee_groupe,
+                "poi_names": poi_names,
+                "pharmacie_names": pharmacie_names,
+                "details": details,
+                "row_keys": row_keys,
+            }
+        )
 
     out = pd.DataFrame(grouped_rows)
     sort_cols = [c for c in ["libelle", "Nom_poste", "quartier_source"] if c in out.columns]
@@ -860,7 +1104,19 @@ def _aggregate_priority_table(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_table_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["row_key", "libelle", "Nom_poste", "quartier_source", "precision", "details", "row_keys"])
+        return pd.DataFrame(
+            columns=[
+                "group_key",
+                "row_key",
+                "libelle",
+                "Nom_poste",
+                "quartier_source",
+                "precision",
+                "details",
+                "row_keys",
+                "selected_key",
+            ]
+        )
 
     filtered_for_table = _build_priority_table(df, max_per_quartier=3, top_distance_pool=6)
     grouped = _aggregate_priority_table(filtered_for_table)
@@ -868,14 +1124,20 @@ def build_table_rows(df: pd.DataFrame) -> pd.DataFrame:
     display_cols = [
         c
         for c in [
+            "group_key",
             "row_key",
             "libelle",
             "Nom_poste",
             "quartier_source",
             "quartier_label",
             "precision",
+            "precision_override",
+            "precision_calculee",
+            "poi_names",
+            "pharmacie_names",
             "details",
             "row_keys",
+            "selected_key",
         ]
         if c in grouped.columns
     ]
@@ -887,17 +1149,17 @@ def compute_payload(selected_keys: list[str], rayon: int = DEFAULT_RADIUS) -> Re
     df = _ensure_final_dataset(rayon)
 
     empty_geojson = {"type": "FeatureCollection", "features": []}
-    empty_table = pd.DataFrame(columns=["row_key", "libelle", "Nom_poste", "quartier_source", "precision"])
+    empty_table = pd.DataFrame(columns=["group_key", "row_key", "libelle", "Nom_poste", "quartier_source", "precision"])
 
     if df.empty or not selected_keys:
-        return ResultPayload(empty_table, empty_geojson, empty_geojson, empty_geojson, rayon)
+        return ResultPayload(empty_table, empty_geojson, empty_geojson, empty_geojson, empty_geojson, rayon)
 
     if "selected_key" not in df.columns:
-        return ResultPayload(empty_table, empty_geojson, empty_geojson, empty_geojson, rayon)
+        return ResultPayload(empty_table, empty_geojson, empty_geojson, empty_geojson, empty_geojson, rayon)
 
     filtered = df[df["selected_key"].astype(str).isin(selected_keys)].copy()
     if filtered.empty:
-        return ResultPayload(empty_table, empty_geojson, empty_geojson, empty_geojson, rayon)
+        return ResultPayload(empty_table, empty_geojson, empty_geojson, empty_geojson, empty_geojson, rayon)
 
     table = build_table_rows(filtered)
 
@@ -906,6 +1168,7 @@ def compute_payload(selected_keys: list[str], rayon: int = DEFAULT_RADIUS) -> Re
         postes_geojson=_build_postes_geojson(filtered),
         zones_geojson=_build_zones_geojson(filtered),
         pois_geojson=_build_pois_geojson(filtered),
+        pharmacies_geojson=_build_pharmacies_geojson(filtered),
         rayon=rayon,
     )
 
@@ -918,20 +1181,46 @@ def export_priority_dataset_to_excel(temp_path: Path, rayon: int = DEFAULT_RADIU
         pd.DataFrame().to_excel(temp_path, index=False)
         return temp_path
 
-    df_priority = _build_priority_table(df, max_per_quartier=3, top_distance_pool=6)
+    grouped = build_table_rows(df)
 
-    base_cols = []
-    postes = load_postes()
-    poste_cols = [c for c in postes.columns if c not in {"geometry", "selected_key", "libelle_ref", "Nom_poste_ref"}]
+    if grouped.empty:
+        pd.DataFrame().to_excel(temp_path, index=False)
+        return temp_path
 
-    for col in poste_cols:
-        if col in df_priority.columns and col not in base_cols:
-            base_cols.append(col)
+    info_cols = [
+        c for c in [
+            "selected_key",
+            "DR",
+            "EXPLOITATION",
+            "DEPART",
+            "TYPE",
+            "libelle",
+            "Nom_poste",
+        ]
+        if c in df.columns
+    ]
 
-    extra_cols = [c for c in ["quartier_source", "precision"] if c in df_priority.columns]
-    export_cols = [c for c in base_cols + extra_cols if c in df_priority.columns]
+    info_df = df[info_cols].drop_duplicates(subset=["selected_key"]).copy()
 
-    export_df = df_priority[export_cols].copy()
+    export_df = grouped.merge(
+        info_df,
+        on=["selected_key", "libelle", "Nom_poste"],
+        how="left",
+    )
+
+    ordered_cols = [
+        "DR",
+        "EXPLOITATION",
+        "DEPART",
+        "TYPE",
+        "libelle",
+        "Nom_poste",
+        "quartier_source",
+        "precision",
+    ]
+    ordered_cols = [c for c in ordered_cols if c in export_df.columns]
+
+    export_df = export_df[ordered_cols].fillna("").copy()
     export_df.to_excel(temp_path, index=False)
 
     return temp_path

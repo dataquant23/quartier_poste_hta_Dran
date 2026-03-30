@@ -37,7 +37,7 @@ body {
     display: grid;
     grid-template-rows: auto auto auto 1fr auto;
     gap: 10px;
-    overflow: hidden;
+    overflow: visible;
 }
 
 .card {
@@ -68,7 +68,7 @@ body {
     letter-spacing: .08em;
     text-transform: uppercase;
     margin: 0 0 4px;
-    font-size: 16px;
+    font-size: 15px;
 }
 
 .hero h3 {
@@ -112,8 +112,10 @@ body {
     padding: 12px 14px;
     margin: 0;
     position: relative;
-    z-index: 100;
+    z-index: 5000;
     align-items: end;
+    overflow: visible;
+
 }
 .selected-panel,
 .results-card,
@@ -500,3 +502,8 @@ tbody tr:hover {
 #resultTable th {
   vertical-align: middle;
 }
+
+.rayon-block {
+    visibility: hidden;
+}
+

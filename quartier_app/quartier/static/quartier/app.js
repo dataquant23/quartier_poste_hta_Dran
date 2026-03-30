@@ -1,10 +1,12 @@
 (() => {
   const cfg = window.QUARTIER_APP;
+
   const state = {
     selected: [],
     postesLayer: null,
     zonesLayer: null,
     poisLayer: null,
+    pharmaciesLayer: null,
     isRefreshing: false,
     isComputing: false,
   };
@@ -22,12 +24,13 @@
   const statusText = document.getElementById("statusText");
 
   const map = L.map("map").setView([5.34, -4.02], 11);
+
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "&copy; OpenStreetMap contributors",
   }).addTo(map);
 
   function selectedKey(item) {
-    return `${String(item.libelle).trim()}||${String(item.Nom_poste).trim()}`;
+    return `${String(item.libelle ?? "").trim()}||${String(item.Nom_poste ?? "").trim()}`;
   }
 
   function setStatus(msg) {
@@ -81,7 +84,7 @@
 
   function renderSearchResults(results) {
     searchResults.innerHTML = "";
-    if (!results.length) return;
+    if (!Array.isArray(results) || !results.length) return;
 
     const panel = document.createElement("div");
     panel.className = "search-results-panel";
@@ -117,6 +120,7 @@
     try {
       const url = new URL(cfg.searchUrl, window.location.origin);
       url.searchParams.set("q", q);
+
       const res = await fetch(url, { credentials: "same-origin" });
       const data = await res.json();
       renderSearchResults(data.results || []);
@@ -129,7 +133,9 @@
   function buildComputeUrl() {
     const url = new URL(cfg.computeUrl, window.location.origin);
     url.searchParams.set("rayon", rayonInput.value || "300");
-    state.selected.forEach((item) => url.searchParams.append("selected", selectedKey(item)));
+    state.selected.forEach((item) => {
+      url.searchParams.append("selected", selectedKey(item));
+    });
     return url;
   }
 
@@ -143,9 +149,12 @@
     if (state.postesLayer) map.removeLayer(state.postesLayer);
     if (state.zonesLayer) map.removeLayer(state.zonesLayer);
     if (state.poisLayer) map.removeLayer(state.poisLayer);
+    if (state.pharmaciesLayer) map.removeLayer(state.pharmaciesLayer);
+
     state.postesLayer = null;
     state.zonesLayer = null;
     state.poisLayer = null;
+    state.pharmaciesLayer = null;
   }
 
   function buildContextPopup(p, geo = {}) {
@@ -158,8 +167,8 @@
       ["Ville", geo.city],
       ["Région", geo.state],
     ]
-      .filter(([, v]) => v)
-      .map(([k, v]) => `<div><b>${escapeHtml(k)}</b> : ${escapeHtml(v)}</div>`)
+      .filter(([, value]) => value)
+      .map(([label, value]) => `<div><b>${escapeHtml(label)}</b> : ${escapeHtml(value)}</div>`)
       .join("");
 
     return `
@@ -175,6 +184,7 @@
     try {
       const url = new URL(cfg.posteContextUrl, window.location.origin);
       url.searchParams.set("selected_key", key);
+
       const res = await fetch(url, { credentials: "same-origin" });
       const data = await res.json();
       return data.data || {};
@@ -184,8 +194,9 @@
     }
   }
 
-  function renderMap(postesGeojson, zonesGeojson, poisGeojson) {
+  function renderMap(postesGeojson, zonesGeojson, poisGeojson, pharmaciesGeojson) {
     clearLayers();
+
     const emptyGeojson = { type: "FeatureCollection", features: [] };
 
     state.zonesLayer = L.geoJSON(zonesGeojson || emptyGeojson, {
@@ -193,8 +204,31 @@
         color: "#1f7a4d",
         weight: 2,
         fillColor: "#79c794",
-        fillOpacity: 0.25,
+        fillOpacity: 0.025,
       }),
+      onEachFeature: (feature, layer) => {
+        const p = feature.properties || {};
+
+        layer.bindPopup(`
+          <div style="min-width:220px">
+            <div><strong>Quartier concerné</strong></div>
+            <div><b>Quartier</b> : ${escapeHtml(p.quartier_source || "-")}</div>
+            <div><b>Poste</b> : ${escapeHtml(p.Nom_poste || "-")}</div>
+            <div><b>Libellé</b> : ${escapeHtml(p.libelle || "-")}</div>
+          </div>
+        `);
+
+        layer.on("mouseover", () => {
+          layer.setStyle({
+            weight: 3,
+            fillOpacity: 0.025,
+          });
+        });
+
+        layer.on("mouseout", () => {
+          state.zonesLayer?.resetStyle(layer);
+        });
+      },
     }).addTo(map);
 
     state.poisLayer = L.geoJSON(poisGeojson || emptyGeojson, {
@@ -208,7 +242,32 @@
         }),
       onEachFeature: (feature, layer) => {
         const p = feature.properties || {};
-        layer.bindPopup(`<strong>POI proche</strong><br>${escapeHtml(p.poi_proche || "-")}`);
+        layer.bindPopup(`
+          <div style="min-width:180px">
+            <div><strong>Point proche</strong></div>
+            <div>${escapeHtml(p.poi_proche || "-")}</div>
+          </div>
+        `);
+      },
+    }).addTo(map);
+
+    state.pharmaciesLayer = L.geoJSON(pharmaciesGeojson || emptyGeojson, {
+      pointToLayer: (_, latlng) =>
+        L.circleMarker(latlng, {
+          radius: 6,
+          color: "#ffffff",
+          weight: 2,
+          fillColor: "#dc2626",
+          fillOpacity: 1,
+        }),
+      onEachFeature: (feature, layer) => {
+        const p = feature.properties || {};
+        layer.bindPopup(`
+          <div style="min-width:180px">
+            <div><strong>Pharmacie proche</strong></div>
+            <div>${escapeHtml(p.pharmacie || "-")}</div>
+          </div>
+        `);
       },
     }).addTo(map);
 
@@ -223,6 +282,7 @@
         }),
       onEachFeature: (feature, layer) => {
         const p = feature.properties || {};
+
         layer.bindPopup(
           `<div><strong>${escapeHtml(p.Nom_poste || "Poste")}</strong><br>Chargement...</div>`
         );
@@ -231,6 +291,7 @@
           layer.setPopupContent(
             `<div><strong>${escapeHtml(p.Nom_poste || "Poste")}</strong><br>Chargement Nominatim...</div>`
           );
+
           const data = await fetchPosteContext(p.selected_key || "");
           layer.setPopupContent(buildContextPopup(data, data.geo_info || {}));
         });
@@ -259,6 +320,7 @@
 
   function buildQuartierDetailsText(row) {
     const details = Array.isArray(row.details) ? row.details : [];
+
     if (!details.length) {
       return `Quartier : ${row.quartier_source || "-"}
 
@@ -280,11 +342,13 @@ ${lines.join("\n")}`;
 
   function autoResizeTextareas(container) {
     const textareas = container.querySelectorAll(".precision-inline-input");
+
     textareas.forEach((textarea) => {
       const resize = () => {
         textarea.style.height = "auto";
         textarea.style.height = `${textarea.scrollHeight}px`;
       };
+
       resize();
       textarea.addEventListener("input", resize);
     });
@@ -317,12 +381,6 @@ ${lines.join("\n")}`;
   }
 
   function openInlineEditor(tr, row) {
-    const details = Array.isArray(row.details) ? row.details : [];
-    if (!details.length) {
-      setStatus("Aucun détail à modifier");
-      return;
-    }
-
     tr.innerHTML = `
       <td>${escapeHtml(row.libelle ?? "")}</td>
       <td>${escapeHtml(row.Nom_poste ?? "")}</td>
@@ -333,15 +391,13 @@ ${lines.join("\n")}`;
       </td>
       <td class="precision-cell">
         <div class="inline-editor">
-          ${details.map((detail, index) => `
-            <div class="inline-editor-row">
-              <textarea
-                class="precision-inline-input"
-                data-row-key="${escapeHtml(detail.row_key || "")}"
-                placeholder="Précision ${index + 1}"
-              >${escapeHtml(detail.precision || "")}</textarea>
-            </div>
-          `).join("")}
+          <div class="inline-editor-row">
+            <textarea
+              class="precision-inline-input"
+              data-group-key="${escapeHtml(row.group_key || "")}"
+              placeholder="Précision"
+            >${escapeHtml(row.precision || "")}</textarea>
+          </div>
         </div>
       </td>
       <td class="action-cell">
@@ -367,46 +423,22 @@ ${lines.join("\n")}`;
       try {
         const saveBtn = tr.querySelector(".btn-save-inline");
         const cancelBtn = tr.querySelector(".btn-cancel-inline");
+        const input = tr.querySelector(".precision-inline-input");
+
         if (saveBtn) saveBtn.disabled = true;
         if (cancelBtn) cancelBtn.disabled = true;
 
-        const inputs = [...tr.querySelectorAll(".precision-inline-input")];
-        if (!inputs.length) {
+        if (!input) {
           setStatus("Aucune valeur à enregistrer");
           if (saveBtn) saveBtn.disabled = false;
           if (cancelBtn) cancelBtn.disabled = false;
           return;
         }
 
-        let savedCount = 0;
-        const updatedDetails = [];
+        const precision = input.value.trim();
+        const ok = await updatePrecision(row, precision, false);
 
-        for (let i = 0; i < inputs.length; i += 1) {
-          const input = inputs[i];
-          const rowKey = (input.dataset.rowKey || "").trim();
-          const precision = input.value.trim();
-
-          console.log("SAVE rowKey =", rowKey, "precision =", precision);
-
-          if (!rowKey) {
-            updatedDetails.push({
-              ...details[i],
-              precision,
-            });
-            continue;
-          }
-
-          const ok = await updatePrecision(rowKey, precision, false);
-          if (ok) savedCount += 1;
-
-          updatedDetails.push({
-            ...details[i],
-            precision,
-          });
-        }
-
-        if (!savedCount) {
-          setStatus("Aucune précision enregistrée");
+        if (!ok) {
           if (saveBtn) saveBtn.disabled = false;
           if (cancelBtn) cancelBtn.disabled = false;
           return;
@@ -414,15 +446,11 @@ ${lines.join("\n")}`;
 
         const updatedRow = {
           ...row,
-          details: updatedDetails,
-          precision: updatedDetails
-            .map((item) => (item.precision || "").trim())
-            .filter(Boolean)
-            .join(", "),
+          precision,
         };
 
         renderRowDisplay(tr, updatedRow);
-        setStatus(`${savedCount} précision(s) enregistrée(s)`);
+        setStatus("Précision enregistrée");
       } catch (err) {
         console.error("Erreur bouton enregistrer :", err);
         setStatus("Erreur pendant l'enregistrement");
@@ -434,7 +462,7 @@ ${lines.join("\n")}`;
     resultTbody.innerHTML = "";
     resultCount.textContent = String(rows.length);
 
-    if (!rows.length) {
+    if (!Array.isArray(rows) || !rows.length) {
       resultTbody.innerHTML = '<tr><td colspan="5">Aucun résultat.</td></tr>';
       return;
     }
@@ -446,10 +474,9 @@ ${lines.join("\n")}`;
     });
   }
 
-  async function updatePrecision(rowKey, precision, refreshAfter = true) {
+  async function updatePrecision(row, precision, refreshAfter = true) {
     try {
       const csrfToken = getCookie("csrftoken");
-      console.log("CSRF token =", csrfToken);
 
       const res = await fetch(cfg.updatePrecisionUrl, {
         method: "POST",
@@ -460,8 +487,10 @@ ${lines.join("\n")}`;
           "X-CSRFToken": csrfToken,
         },
         body: JSON.stringify({
-          row_key: rowKey,
-          precision: precision,
+          group_key: row.group_key || "",
+          selected_key: row.selected_key || "",
+          quartier_source: row.quartier_source || "",
+          precision,
         }),
       });
 
@@ -505,19 +534,25 @@ ${lines.join("\n")}`;
     try {
       if (!state.selected.length) {
         renderTable([]);
-        renderMap(null, null, null);
+        renderMap(null, null, null, null);
         setStatus("Aucun poste sélectionné");
         return;
       }
 
       setStatus("Lecture du fichier final...");
+
       const res = await fetch(buildComputeUrl(), {
         credentials: "same-origin",
       });
       const data = await res.json();
 
       renderTable(data.rows || []);
-      renderMap(data.postes_geojson, data.zones_geojson, data.pois_geojson);
+      renderMap(
+        data.postes_geojson,
+        data.zones_geojson,
+        data.pois_geojson,
+        data.pharmacies_geojson
+      );
       setStatus(`Rayon ${data.rayon} m`);
     } catch (err) {
       console.error("Erreur compute :", err);
@@ -535,6 +570,7 @@ ${lines.join("\n")}`;
 
     try {
       setStatus("Rafraîchissement en cours...");
+
       const url = new URL(cfg.refreshUrl, window.location.origin);
       url.searchParams.set("rayon", rayonInput.value || "300");
 
@@ -560,6 +596,7 @@ ${lines.join("\n")}`;
   }
 
   let timer = null;
+
   searchInput.addEventListener("input", () => {
     const q = searchInput.value.trim();
     clearTimeout(timer);

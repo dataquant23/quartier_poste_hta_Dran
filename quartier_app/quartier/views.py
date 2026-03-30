@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
+from datetime import datetime
 from pathlib import Path
 
 from django.conf import settings
-from django.http import FileResponse, JsonResponse
+from django.http import FileResponse, HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
@@ -16,7 +18,7 @@ from .services import (
     get_poste_context,
     load_precalc,
     refresh_final_dataset,
-    save_precision_override,
+    save_group_precision_override,
     search_postes,
 )
 
@@ -64,6 +66,7 @@ def api_compute(request):
             "postes_geojson": payload.postes_geojson,
             "zones_geojson": payload.zones_geojson,
             "pois_geojson": payload.pois_geojson,
+            "pharmacies_geojson": payload.pharmacies_geojson,
         }
     )
 
@@ -89,20 +92,20 @@ def api_poste_context(request):
 def api_update_precision(request):
     try:
         payload = json.loads(request.body.decode("utf-8") or "{}")
-        row_key = payload.get("row_key", "")
+        group_key = payload.get("group_key", "")
+        selected_key = payload.get("selected_key", "")
+        quartier_source = payload.get("quartier_source", "")
         precision_override = payload.get("precision", "")
 
-        print("DEBUG update_precision payload =", payload)
-        print("DEBUG row_key =", row_key)
-        print("DEBUG precision_override =", precision_override)
-
-        row = save_precision_override(row_key, precision_override)
-
-        print("DEBUG update_precision OK")
+        row = save_group_precision_override(
+            group_key=group_key,
+            selected_key=selected_key,
+            quartier_source=quartier_source,
+            precision_override=precision_override,
+        )
         return JsonResponse({"ok": True, "row": row})
 
     except Exception as e:
-        print("DEBUG update_precision ERROR =", repr(e))
         return JsonResponse({"ok": False, "error": str(e)}, status=400)
 
 
@@ -113,11 +116,23 @@ def download_excel(request):
     except Exception:
         rayon = settings.DEFAULT_RADIUS
 
-    temp_path = Path(settings.DATA_DIR) / "download_quartiers_alimentes_par_poste.xlsx"
+    now_str = datetime.now().strftime("%Y%m%d_%H%M")
+    filename = f"quartiers_alimentes_par_poste_{now_str}.xlsx"
+
+    temp_path = Path(settings.BASE_DIR) / "tmp_export_quartier.xlsx"
     export_priority_dataset_to_excel(temp_path, rayon)
 
-    return FileResponse(
-        open(temp_path, "rb"),
-        as_attachment=True,
-        filename="quartiers_alimentes_par_poste.xlsx",
+    with open(temp_path, "rb") as f:
+        content = f.read()
+
+    try:
+        temp_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    response = HttpResponse(
+        content,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
