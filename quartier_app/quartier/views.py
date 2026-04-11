@@ -10,7 +10,8 @@ from django.http import FileResponse, HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
-
+from pathlib import Path
+from django.http import HttpResponse
 from .services import (
     build_table_rows,
     compute_payload,
@@ -20,6 +21,8 @@ from .services import (
     refresh_final_dataset,
     save_group_precision_override,
     search_postes,
+    compute_bilan_stats,
+    export_bilan_to_excel,
 )
 
 
@@ -136,3 +139,51 @@ def download_excel(request):
     )
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+
+@require_GET
+def api_bilan(request):
+    stats = compute_bilan_stats()
+    return JsonResponse({"ok": True, "stats": stats})
+
+
+@require_GET
+def download_bilan_excel(request):
+    now_str = datetime.now().strftime("%Y%m%d_%H%M")
+    filename = f"bilan_cartographie_postes_{now_str}.xlsx"
+
+    temp_path = Path(settings.BASE_DIR) / "tmp_bilan_cartographie.xlsx"
+    export_bilan_to_excel(temp_path)
+
+    with open(temp_path, "rb") as f:
+        content = f.read()
+
+    try:
+        temp_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    response = HttpResponse(
+        content,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+from django.contrib.auth import authenticate, login
+from django.shortcuts import render, redirect
+
+def login_view(request):
+    error_message = ""
+
+    if request.method == "POST":
+        username = request.POST.get("username", "").strip()
+        password = request.POST.get("password", "")
+
+        user = authenticate(request, username=username, password=password)
+        if user is not None:
+            login(request, user)
+            return redirect("quartier:index")
+        else:
+            error_message = "Identifiants invalides."
+
+    return render(request, "quartier/login.html", {"error_message": error_message})

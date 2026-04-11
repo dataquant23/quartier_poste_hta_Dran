@@ -11,4 +11,7 @@ urlpatterns = [
     path('api/poste-context/', views.api_poste_context, name='api_poste_context'),
     path('api/update-precision/', views.api_update_precision, name='api_update_precision'),
     path('download/', views.download_excel, name='download_excel'),
+    path('api/bilan/', views.api_bilan, name='api_bilan'),
+    path('download-bilan/', views.download_bilan_excel, name='download_bilan_excel'),
+    path("login/", views.login_view, name="login"),
 ]

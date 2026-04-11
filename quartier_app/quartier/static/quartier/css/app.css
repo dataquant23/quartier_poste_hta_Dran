@@ -507,3 +507,248 @@ tbody tr:hover {
     visibility: hidden;
 }
 
+
+
+@media (max-width: 900px) {
+    .content-grid {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+
+    .map-card {
+        order: 1;
+    }
+
+    .results-card {
+        order: 2;
+    }
+
+    #map {
+        height: 95vh;
+        min-height: 420px;
+    }
+
+    .page-shell {
+        width: calc(100% - 12px);
+        margin: 6px auto;
+    }
+
+   .control-panel {
+    gap: 6px; /* au lieu de 10px */
+    }
+    .rayon-block {
+        height: 0;
+        overflow: hidden;
+        margin: 0;
+        padding: 0;
+    }
+
+    .search-block {
+        margin-bottom: 0;
+    }
+
+    .action-block {
+        margin-top: 0;
+        gap: 6px; /* au lieu de 8px */
+    }
+
+    .action-block .btn {
+        width: 100%;
+        min-width: 0;
+    }
+}
+
+.btn-success {
+    background: linear-gradient(135deg, var(--green), #16613c);
+    color: white;
+}
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.42);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 300000;
+    padding: 16px;
+}
+
+.modal-overlay.is-open {
+    display: flex;
+}
+
+.modal-card {
+    width: min(760px, 100%);
+    background: #ffffff;
+    border-radius: 22px;
+    box-shadow: 0 30px 80px rgba(15, 23, 42, 0.20);
+    border: 1px solid rgba(31, 122, 77, 0.10);
+    overflow: hidden;
+}
+
+.modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 18px 20px;
+    border-bottom: 1px solid #eef2f7;
+    background: linear-gradient(135deg, #ffffff 0%, #f8fcfa 100%);
+}
+
+.modal-head h3 {
+    margin: 0;
+    font-size: 18px;
+    color: var(--ink);
+}
+
+.modal-close {
+    width: 38px;
+    height: 38px;
+    border: 0;
+    border-radius: 999px;
+    background: #f3f4f6;
+    color: #334155;
+    font-size: 22px;
+    cursor: pointer;
+}
+
+.modal-body {
+    padding: 20px;
+}
+
+.bilan-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+
+.bilan-item {
+    background: #fbfcfd;
+    border: 1px solid #e5e7eb;
+    border-radius: 18px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 120px;
+}
+
+.bilan-item-total {
+    grid-column: 1 / -1;
+    background: linear-gradient(135deg, #fff8ef 0%, #f1fbf5 100%);
+    border-color: rgba(31,122,77,0.14);
+}
+
+.bilan-label {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--muted);
+    font-weight: 600;
+}
+
+.bilan-item strong {
+    font-size: 32px;
+    line-height: 1;
+    color: var(--green);
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 16px 20px 20px;
+    border-top: 1px solid #eef2f7;
+}
+
+@media (max-width: 768px) {
+    .bilan-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .modal-card {
+        border-radius: 18px;
+    }
+
+    .modal-head,
+    .modal-body,
+    .modal-footer {
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+
+    .modal-footer {
+        flex-direction: column;
+    }
+
+    .modal-footer .btn {
+        width: 100%;
+    }
+}
+
+.bilan-item {
+    background: linear-gradient(145deg, #ffffff, #f8fafc);
+    border: 1px solid rgba(0,0,0,0.06);
+    border-radius: 18px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 120px;
+    transition: all 0.25s ease;
+    box-shadow: 0 8px 25px rgba(0,0,0,0.04);
+}
+
+.bilan-item:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 30px rgba(0,0,0,0.08);
+}
+
+.bilan-item strong {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: -1px;
+}
+
+/* Couleurs différenciées */
+.bilan-item:nth-child(1) strong {
+    color: #16a34a;
+}
+
+.bilan-item:nth-child(2) strong {
+    color: #dc2626;
+}
+
+.bilan-item:nth-child(3) strong {
+    color: #2563eb;
+}
+
+.bilan-item:nth-child(4) strong {
+    color: #d97706;
+}
+
+.bilan-item-total {
+    grid-column: 1 / -1;
+    background: linear-gradient(135deg, #0f5132, #198754);
+    color: white;
+    border: none;
+    box-shadow: 0 10px 30px rgba(25, 135, 84, 0.25);
+}
+
+.bilan-item-total strong {
+    color: white;
+    font-size: 40px;
+}
+
+/* Labels plus stylés */
+.bilan-label {
+    font-size: 13px;
+    font-weight: 600;
+    opacity: 0.8;
+}
+
+.modal-subtitle {
+    font-size: 13px;
+    color: #64748b;
+}

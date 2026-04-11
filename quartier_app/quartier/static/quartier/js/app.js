@@ -22,8 +22,18 @@
   const resultCount = document.getElementById("resultCount");
   const resultTbody = document.querySelector("#resultTable tbody");
   const statusText = document.getElementById("statusText");
-
   const map = L.map("map").setView([5.34, -4.02], 11);
+  const bilanBtn = document.getElementById("bilanBtn");
+  const bilanModal = document.getElementById("bilanModal");
+  const closeBilanModalBtn = document.getElementById("closeBilanModalBtn");
+  const closeBilanFooterBtn = document.getElementById("closeBilanFooterBtn");
+  const downloadBilanBtn = document.getElementById("downloadBilanBtn");
+
+  const statAvecPrecision = document.getElementById("statAvecPrecision");
+  const statSansPrecision = document.getElementById("statSansPrecision");
+  const statModifiee = document.getElementById("statModifiee");
+  const statCompletee = document.getElementById("statCompletee");
+  const statTotalPostes = document.getElementById("statTotalPostes");
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "&copy; OpenStreetMap contributors",
@@ -526,6 +536,60 @@ ${lines.join("\n")}`;
       return false;
     }
   }
+
+function openBilanModal() {
+  if (!bilanModal) return;
+  bilanModal.classList.add("is-open");
+  bilanModal.setAttribute("aria-hidden", "false");
+}
+
+function closeBilanModal() {
+  if (!bilanModal) return;
+  bilanModal.classList.remove("is-open");
+  bilanModal.setAttribute("aria-hidden", "true");
+}
+
+function renderBilanStats(stats = {}) {
+  if (statAvecPrecision) statAvecPrecision.textContent = String(stats.nb_postes_avec_precision_source ?? 0);
+  if (statSansPrecision) statSansPrecision.textContent = String(stats.nb_postes_sans_precision_source ?? 0);
+  if (statModifiee) statModifiee.textContent = String(stats.nb_postes_precision_existante_modifiee ?? 0);
+  if (statCompletee) statCompletee.textContent = String(stats.nb_postes_sans_precision_completee_par_user ?? 0);
+  if (statTotalPostes) statTotalPostes.textContent = String(stats.nb_total_postes ?? 0);
+}
+
+async function loadBilanStats() {
+  try {
+    setStatus("Chargement du bilan...");
+    const res = await fetch(cfg.bilanUrl, { credentials: "same-origin" });
+    const data = await res.json();
+
+    if (!res.ok || !data.ok) {
+      setStatus("Erreur lors du chargement du bilan");
+      return;
+    }
+
+    renderBilanStats(data.stats || {});
+    openBilanModal();
+    setStatus("Bilan chargé");
+  } catch (err) {
+    console.error("Erreur bilan :", err);
+    setStatus("Erreur lors du chargement du bilan");
+  }
+}
+bilanBtn?.addEventListener("click", loadBilanStats);
+closeBilanModalBtn?.addEventListener("click", closeBilanModal);
+closeBilanFooterBtn?.addEventListener("click", closeBilanModal);
+
+downloadBilanBtn?.addEventListener("click", () => {
+  window.location.href = cfg.downloadBilanUrl;
+});
+
+bilanModal?.addEventListener("click", (e) => {
+  if (e.target === bilanModal) {
+    closeBilanModal();
+  }
+});
+
 
   async function compute() {
     if (state.isComputing) return;

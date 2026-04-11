@@ -4,9 +4,11 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <title>Quartiers alimentés par les postes</title>
+
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="{% static 'quartier/app.css' %}" />
+    <link rel="stylesheet" href="{% static 'quartier/css/app.css' %}" />
 </head>
 <body>
     <div class="page-shell">
@@ -29,6 +31,7 @@
             </div>
             <div class="action-block">
                 <!-- <button id="computeBtn" class="btn btn-primary" type="button">Actualiser</button> -->
+                <button id="bilanBtn" class="btn btn-success" type="button">Bilan</button>
                 <button id="downloadBtn" class="btn btn-primary" type="button">Télécharger</button>
                 <!-- <button id="refreshBtn" class="btn btn-secondary" type="button">Rafraîchir</button> -->
                 
@@ -83,7 +86,53 @@
     <div style="display:none;">
         {% csrf_token %}
     </div>
+    <div id="bilanModal" class="modal-overlay" aria-hidden="true">
+    <div class="modal-card">
+        <div class="modal-head">
+            <h3>Bilan </h3>
+            <p class="modal-subtitle">Analyse globale des précisions et modifications utilisateur</p>
+            <button id="closeBilanModalBtn" class="modal-close" type="button">×</button>
+        </div>
 
+        <div class="modal-body">
+            <div class="bilan-grid">
+                <div class="bilan-item">
+                    <span class="bilan-label">✔ Postes avec précision</span>
+                    <strong id="statAvecPrecision">0</strong>
+                </div>
+
+                <div class="bilan-item">
+                    <span class="bilan-label">✖ Postes sans précision</span>
+                    <strong id="statSansPrecision">0</strong>
+                </div>
+
+                <div class="bilan-item">
+                    <span class="bilan-label">✏️ Postes modifiés</span>
+                    <strong id="statModifiee">0</strong>
+                </div>
+
+                <div class="bilan-item">
+                    <span class="bilan-label">➕ Postes complétés</span>
+                    <strong id="statCompletee">0</strong>
+                </div>
+
+                <div class="bilan-item bilan-item-total">
+                    <span class="bilan-label">Nombre total de postes</span>
+                    <strong id="statTotalPostes">0</strong>
+                </div>
+            </div>
+        </div>
+
+        <div class="modal-footer">
+            <button id="downloadBilanBtn" class="btn btn-primary" type="button">
+                Télécharger Excel
+            </button>
+            <button id="closeBilanFooterBtn" class="btn btn-light" type="button">
+                Fermer
+            </button>
+        </div>
+    </div>
+</div>
     <script>
         window.QUARTIER_APP = {
             searchUrl: "{% url 'quartier:api_search_postes' %}",
@@ -91,10 +140,13 @@
             refreshUrl: "{% url 'quartier:api_refresh' %}",
             posteContextUrl: "{% url 'quartier:api_poste_context' %}",
             updatePrecisionUrl: "{% url 'quartier:api_update_precision' %}",
-            downloadUrl: "{% url 'quartier:download_excel' %}"
+            downloadUrl: "{% url 'quartier:download_excel' %}",
+            bilanUrl: "{% url 'quartier:api_bilan' %}",
+            downloadBilanUrl: "{% url 'quartier:download_bilan_excel' %}"
+
         };
     </script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="{% static 'quartier/app.js' %}"></script>
+    <script src="{% static 'quartier/js/app.js' %}"></script>
 </body>
 </html>
